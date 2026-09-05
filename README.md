@@ -1,1 +1,1 @@
-Live url-> cube-23fhvuxts-arpits-projects-58f6d206.vercel.app
+Live url-> https://cube-lab-roan.vercel.app
