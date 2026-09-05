@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="CUBE LAB — Interactive 3D Multi-Puzzle Cube Simulation & Automated Solving System. Explore, scramble, solve, and learn Rubik's Cube puzzles in an immersive 3D studio." />
+  <title>CUBE LAB — Interactive 3D Puzzle Studio</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@500;600;700;800&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/src/styles/main.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Ambient background effects -->
+    <div id="ambient-bg">
+      <div class="ambient-orb orb-1"></div>
+      <div class="ambient-orb orb-2"></div>
+      <div class="ambient-orb orb-3"></div>
+    </div>
+
+    <!-- Three.js canvas will be injected here by SceneManager -->
+    <div id="canvas-container"></div>
+
+    <!-- UI overlay layer — sits on top of the 3D canvas -->
+    <div id="ui-layer">
+      <!-- Welcome screen -->
+      <div id="welcome-screen" class="ui-panel hidden"></div>
+
+      <!-- Top HUD bar (timer + moves + mode) -->
+      <div id="hud-bar" class="hidden"></div>
+
+      <!-- Right side: compact face move panel -->
+      <div id="moves-panel" class="ui-panel hidden"></div>
+
+      <!-- Bottom action toolbar -->
+      <div id="action-bar" class="hidden"></div>
+
+      <!-- Interactive Guidance overlay -->
+      <div id="guide-overlay" class="ui-panel hidden"></div>
+
+      <!-- Solve mode overlay -->
+      <div id="solve-overlay" class="ui-panel hidden"></div>
+
+      <!-- Learning mode overlay -->
+      <div id="learning-overlay" class="ui-panel hidden"></div>
+
+      <!-- Settings panel -->
+      <div id="settings-panel" class="hidden"></div>
+
+      <!-- Statistics panel -->
+      <div id="stats-panel" class="hidden"></div>
+
+      <!-- Pattern Gallery Modal -->
+      <div id="pattern-modal" class="hidden"></div>
+
+      <!-- Sticker Uploader Modal -->
+      <div id="sticker-modal" class="hidden"></div>
+
+      <!-- Webcam Scanner Overlay -->
+      <div id="scanner-modal" class="hidden"></div>
+
+      <!-- Celebration overlay -->
+      <div id="celebration-overlay" class="hidden"></div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
