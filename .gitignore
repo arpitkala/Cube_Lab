@@ -1,10 +1,13 @@
 # Dependencies
 node_modules
+client/node_modules
+server/node_modules
 .pnpm-store
 
 # Production build outputs
 dist
-dist-ssr
+client/dist
+client/dist-ssr
 *.local
 
 # Environment variables
