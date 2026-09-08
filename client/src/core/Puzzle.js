@@ -167,6 +167,21 @@ export class Puzzle {
    * Check if the puzzle is solved.
    * @returns {boolean}
    */
+  /**
+   * Apply scanned facelet colors to the 3D puzzle cubie materials.
+   * @param {Object} scannedData
+   */
+  setScannedState(scannedData) {
+    this.state.setScannedState(scannedData);
+    for (const cubieData of this.state.cubies) {
+      const cubie = this.cubieMap.get(cubieData.id);
+      if (cubie) {
+        cubie.faceColors = { ...cubieData.faceColors };
+        cubie.updateMaterials(this.materials);
+      }
+    }
+  }
+
   isSolved() {
     return this.state.isSolved();
   }

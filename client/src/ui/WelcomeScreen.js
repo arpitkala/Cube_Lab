@@ -9,10 +9,14 @@ export class WelcomeScreen {
   /**
    * @param {HTMLElement} container
    * @param {Function} onStart — callback({ size: number, isMirror: boolean|string })
+   * @param {Function} onShowAbout — callback()
+   * @param {Function} onShowBeginnerGuide — callback()
    */
-  constructor(container, onStart) {
+  constructor(container, onStart, onShowAbout, onShowBeginnerGuide) {
     this.container = container;
     this.onStart = onStart;
+    this.onShowAbout = onShowAbout;
+    this.onShowBeginnerGuide = onShowBeginnerGuide;
     this.selectedConfig = { size: 3, isMirror: false };
 
     this._build();
@@ -126,17 +130,26 @@ export class WelcomeScreen {
           </button>
         </div>
 
-        <button class="btn btn--primary welcome-start" id="start-btn">
-          <span>START SOLVING</span>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-        </button>
+        <div class="welcome-actions">
+          <button class="btn btn--primary welcome-start" id="start-btn">
+            <span>START SOLVING</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+          
+          <button class="btn welcome-btn-secondary" id="welcome-beginner-btn" title="Beginner's Guide & Notation Tutorial">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span>Beginner Guide</span>
+          </button>
+
+          <button class="btn welcome-btn-secondary welcome-btn-about" id="welcome-about-btn" title="About CUBE LAB & Credits">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            <span>About Studio</span>
+          </button>
+        </div>
 
         <div class="welcome-footer">
           <div class="welcome-credits">
-            <span class="credits-label">Designed & Developed by</span>
-            <strong class="creator">Arpit Kala</strong>
-            <span class="credits-amp">&</span>
-            <strong class="creator">Akshat Agrawal</strong>
+            <span class="credits-label">CUBE LAB Studio</span>
           </div>
         </div>
       </div>
@@ -157,6 +170,16 @@ export class WelcomeScreen {
     // Start button
     this.container.querySelector('#start-btn').addEventListener('click', () => {
       this.onStart?.(this.selectedConfig);
+    });
+
+    // Beginner guide button
+    this.container.querySelector('#welcome-beginner-btn')?.addEventListener('click', () => {
+      this.onShowBeginnerGuide?.();
+    });
+
+    // About button
+    this.container.querySelector('#welcome-about-btn')?.addEventListener('click', () => {
+      this.onShowAbout?.();
     });
   }
 

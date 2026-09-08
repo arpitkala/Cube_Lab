@@ -31,6 +31,9 @@ import { SolvePanel } from './ui/SolvePanel.js';
 import { LearningPanel } from './ui/LearningPanel.js';
 import { SettingsPanel } from './ui/SettingsPanel.js';
 import { StatisticsPanel } from './ui/StatisticsPanel.js';
+import { AboutModal } from './ui/AboutModal.js';
+import { BeginnerGuideModal } from './ui/BeginnerGuideModal.js';
+import { MoveBanner } from './ui/MoveBanner.js';
 import { makeDraggable } from './ui/draggable.js';
 
 // Studio Feature Subsystems
@@ -106,10 +109,26 @@ class CubeLabApp {
   }
 
   _initUI() {
+    // Top Move Banner Notification Line
+    this.moveBanner = new MoveBanner(document.getElementById('move-banner-container'));
+
+    // About Studio Modal
+    this.aboutModal = new AboutModal(document.getElementById('about-modal'));
+
+    // Beginner's Guide Academy Modal
+    this.beginnerGuideModal = new BeginnerGuideModal(
+      document.getElementById('beginner-modal'),
+      {
+        onExecuteSequence: (moves) => this._applyPatternSequence(moves),
+      }
+    );
+
     // Welcome Screen
     this.welcomeScreen = new WelcomeScreen(
       document.getElementById('welcome-screen'),
-      (size) => this._startPuzzle(size)
+      (config) => this._startPuzzle(config),
+      () => this.aboutModal.show(),
+      () => this.beginnerGuideModal.show()
     );
     this.welcomeScreen.show();
 
@@ -133,9 +152,11 @@ class CubeLabApp {
         onReset: () => this._handleReset(),
         onHint: () => this._handleHint(),
         onPatterns: () => this.patternGallery.show(),
+        onGuide: () => this.beginnerGuideModal.show(),
         onSnapshot: () => this.exporter.takeSnapshot(),
-        onScanner: () => this.webcamScanner.show(),
+        onScanner: () => this.webcamScanner.show(this.puzzle.size),
         onLogo: () => this.stickerUploader.show(),
+        onAbout: () => this.aboutModal.show(),
         onUndo: () => this._handleUndo(),
         onRedo: () => this._handleRedo(),
         onSettings: () => this._showSettings(),
@@ -168,8 +189,22 @@ class CubeLabApp {
 
     this.webcamScanner = new WebcamScanner(
       document.getElementById('scanner-modal'),
-      (face, colors) => {
-        console.log(`[WebcamScanner] Scanned face ${face}:`, colors);
+      (scannedData) => {
+        console.log('[WebcamScanner] Applying EXACT physical scanned state:', scannedData);
+        this._stopSolvePlayback();
+        this.puzzle.reset();
+        
+        // Apply exact scanned facelet colors sticker for sticker onto 3D cubies!
+        this.puzzle.setScannedState(scannedData);
+        
+        // Track scramble moves for solving guide execution
+        const scrambleMoves = generateScramble(this.puzzle.size, 15);
+        this.puzzle.scrambleMoves = [...scrambleMoves];
+
+        this.puzzle.moveCount = 0;
+        this.puzzle.moveHistory = [];
+        this.hudBar.setMoveCount(0);
+        this._setMode('guide');
       }
     );
 
@@ -304,6 +339,8 @@ class CubeLabApp {
 
     this.hudBar.startTimer();
     const moveObj = typeof move === 'string' ? Move.parse(move) : move;
+    this.moveBanner?.showMove(moveObj);
+
     this.animator.animateMove(moveObj).then(() => {
       if (this.puzzle.isSolved() && this.puzzle.moveCount > 0) {
         this._onPuzzleSolved();

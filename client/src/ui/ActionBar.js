@@ -30,8 +30,8 @@ export class ActionBar {
           <button class="btn actionbar-btn" id="ab-patterns" title="Famous Pattern Gallery">
             <span>🏁 Patterns</span>
           </button>
-          <button class="btn actionbar-btn" id="ab-snapshot" title="4K HD Snapshot">
-            <span>📷 Snapshot</span>
+          <button class="btn actionbar-btn" id="ab-guide" title="Beginner's Guide Academy">
+            <span>🎓 Guide</span>
           </button>
           <button class="btn actionbar-btn" id="ab-scanner" title="Physical Cube Reader">
             <span>👁️ Camera</span>
@@ -66,7 +66,7 @@ export class ActionBar {
     this.container.querySelector('#ab-reset')?.addEventListener('click', () => cb.onReset?.());
     this.container.querySelector('#ab-hint')?.addEventListener('click', () => cb.onHint?.());
     this.container.querySelector('#ab-patterns')?.addEventListener('click', () => cb.onPatterns?.());
-    this.container.querySelector('#ab-snapshot')?.addEventListener('click', () => cb.onSnapshot?.());
+    this.container.querySelector('#ab-guide')?.addEventListener('click', () => cb.onGuide?.());
     this.container.querySelector('#ab-scanner')?.addEventListener('click', () => cb.onScanner?.());
     this.container.querySelector('#ab-logo')?.addEventListener('click', () => cb.onLogo?.());
     this.container.querySelector('#ab-undo')?.addEventListener('click', () => cb.onUndo?.());

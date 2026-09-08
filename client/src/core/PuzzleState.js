@@ -85,10 +85,10 @@ const AXIS_ROTATIONS = {
 export const SOLVED_COLORS = {
   U: 'white',
   D: 'yellow',
-  F: 'red',
-  B: 'orange',
-  R: 'blue',
-  L: 'green',
+  F: 'blue',
+  B: 'green',
+  R: 'red',
+  L: 'orange',
 };
 
 export class PuzzleState {
@@ -274,6 +274,47 @@ export class PuzzleState {
     }
 
     return grid;
+  }
+
+  /**
+   * Apply scanned facelet color arrays to cubie face colors.
+   * @param {Object} scannedData — { U: [], D: [], F: [], B: [], L: [], R: [] }
+   */
+  setScannedState(scannedData) {
+    if (!scannedData) return;
+    const half = (this.size - 1) / 2;
+    const faces = ['U', 'D', 'F', 'B', 'R', 'L'];
+
+    for (const face of faces) {
+      const colors = scannedData[face];
+      if (!colors || colors.length !== this.size * this.size) continue;
+
+      const axisMap = { U: 'y', D: 'y', R: 'x', L: 'x', F: 'z', B: 'z' };
+      const coordMap = { U: half, D: -half, R: half, L: -half, F: half, B: -half };
+
+      const axis = axisMap[face];
+      const coord = coordMap[face];
+      const cubies = this.getCubiesInLayer(axis, coord);
+
+      for (const cubie of cubies) {
+        const pos = cubie.position;
+        let row, col;
+
+        switch (face) {
+          case 'U': row = Math.round(half - pos.z); col = Math.round(pos.x + half); break;
+          case 'D': row = Math.round(pos.z + half); col = Math.round(pos.x + half); break;
+          case 'F': row = Math.round(half - pos.y); col = Math.round(pos.x + half); break;
+          case 'B': row = Math.round(half - pos.y); col = Math.round(half - pos.x); break;
+          case 'R': row = Math.round(half - pos.y); col = Math.round(half - pos.z); break;
+          case 'L': row = Math.round(half - pos.y); col = Math.round(pos.z + half); break;
+        }
+
+        const idx = row * this.size + col;
+        if (colors[idx]) {
+          cubie.faceColors[face] = colors[idx];
+        }
+      }
+    }
   }
 
   /**
