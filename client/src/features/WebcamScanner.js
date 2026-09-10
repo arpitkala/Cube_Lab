@@ -44,6 +44,9 @@ const CELL_SAMPLE_RATIO = 0.5;
  * decide *which* of the six measured reference colours is which — the actual
  * classification is relative to the colours measured from the user's cube.
  */
+/** Lab chroma below which a sticker is considered white (grey/neutral). */
+const WHITE_CHROMA_CUTOFF = 33;
+
 const CANONICAL_RGB = {
   white:  [245, 245, 245],
   yellow: [240, 220, 30],
@@ -141,6 +144,10 @@ export class WebcamScanner {
                 Upload Picture
                 <input type="file" id="cam-file-input" accept="image/*" class="hidden" />
               </label>
+              <button class="btn" id="btn-autofix-colors" title="Re-classify every captured sticker relative to the others">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                Auto-fix Colors
+              </button>
             </div>
 
             <div class="scan-status-toast hidden" id="scan-status-toast">
@@ -243,6 +250,20 @@ export class WebcamScanner {
       reader.onerror = () => this._toast('⚠ Could not read that file');
       reader.onload = (evt) => this._loadAndSampleImage(evt.target.result);
       reader.readAsDataURL(file);
+    });
+
+    // Auto-fix: re-run the relative calibration on demand. Hand edits are
+    // dropped here on purpose — the user is asking for a fresh automatic read.
+    this.container.querySelector('#btn-autofix-colors')?.addEventListener('click', () => {
+      FACES_ORDER.forEach(f => this.manualEdits[f.code].clear());
+      if (!this._recalibrateColors()) {
+        this._toast('⚠ Capture at least one face with the camera or a picture first', 2800);
+        return;
+      }
+      this._renderGridOverlayAndEditor();
+      this._updateNetPreview();
+      const problem = this._validateScannedState();
+      this._toast(problem ? `⚠ ${problem}` : '✓ Colors re-calibrated', 3000);
     });
 
     // Generate solver guide
@@ -727,13 +748,13 @@ export class WebcamScanner {
   }
 
   /**
-   * Classify an RGB triple as one of the six standard sticker colors.
+   * First-pass classification of a single sticker against canonical colours.
    *
-   * Works in HSV: value separates bright stickers from shadowed ones,
-   * saturation separates white from the chromatic colors, and hue separates
-   * the five chromatic colors from each other. Every hue is assigned to a
-   * color — the previous version left 260°–345° unclaimed and fell through to
-   * white, which turned violet-cast reds into whites under warm lighting.
+   * Works in CIE Lab: chroma (distance from grey) separates white from the
+   * chromatic colours, and the hue angle separates the five chromatic colours.
+   * Lightness is nearly ignored because exposure varies wildly between
+   * captures. This is only a starting guess — once faces are captured,
+   * `_recalibrateColors` re-reads every sticker relative to the others.
    *
    * @param {number} r 0-255
    * @param {number} g 0-255
@@ -741,47 +762,37 @@ export class WebcamScanner {
    * @returns {string}
    */
   _classifyRGBToCubeColor(r, g, b) {
-    const rN = r / 255;
-    const gN = g / 255;
-    const bN = b / 255;
+    const [L, a, bb] = this._rgbToLab([r, g, b]);
+    const chroma = Math.hypot(a, bb);
 
-    const max = Math.max(rN, gN, bN);
-    const min = Math.min(rN, gN, bN);
-    const delta = max - min;
+    // White: little chroma. A warm-lit white carries some yellow tint (chroma
+    // ~30) but a genuine yellow sticker is far more saturated (chroma 40+),
+    // even when washed out by over-exposure.
+    if (chroma < WHITE_CHROMA_CUTOFF) return 'white';
 
-    const v = max;
-    const s = max === 0 ? 0 : delta / max;
-
-    let h = 0;
-    if (delta > 0) {
-      if (max === rN) h = ((gN - bN) / delta) % 6;
-      else if (max === gN) h = (bN - rN) / delta + 2;
-      else h = (rN - gN) / delta + 4;
-      h = Math.round(h * 60);
-      if (h < 0) h += 360;
+    let best = 'red';
+    let bestDist = Infinity;
+    for (const [name, lab] of Object.entries(this._canonicalLab())) {
+      if (name === 'white') continue;
+      const [cL, ca, cb] = lab;
+      let dh = Math.abs(Math.atan2(bb, a) - Math.atan2(cb, ca));
+      if (dh > Math.PI) dh = 2 * Math.PI - dh;
+      const dist = (dh * 180) / Math.PI
+        + 0.15 * Math.abs(chroma - Math.hypot(ca, cb))
+        + 0.10 * Math.abs(L - cL);
+      if (dist < bestDist) { bestDist = dist; best = name; }
     }
+    return best;
+  }
 
-    // White: little chroma. The threshold rises with brightness because a dim
-    // white sticker in shadow still reads as near-neutral, while a dark, weakly
-    // saturated pixel is more likely a shadowed colored sticker than a white one.
-    const whiteSatCutoff = v > 0.65 ? 0.30 : 0.18;
-    if (s < whiteSatCutoff) return 'white';
-
-    // Yellow and white are the pair most often confused: a yellow sticker is
-    // saturated in the 40°–70° band, whereas warm-lit white is not.
-    if (h >= 40 && h < 72) return 'yellow';
-    if (h >= 72 && h < 165) return 'green';
-    if (h >= 165 && h < 260) return 'blue';
-
-    // Orange vs. red both sit in the 0°–40° band. Orange carries a
-    // meaningfully higher green component relative to red than red does.
-    if (h >= 15 && h < 40) return 'orange';
-    if (h < 15 || h >= 260) {
-      const greenRatio = rN > 0 ? gN / rN : 0;
-      return greenRatio > 0.42 ? 'orange' : 'red';
+  /** Canonical reference colours in Lab, computed once. */
+  _canonicalLab() {
+    if (!this._canonicalLabCache) {
+      this._canonicalLabCache = Object.fromEntries(
+        Object.entries(CANONICAL_RGB).map(([n, rgb]) => [n, this._rgbToLab(rgb)])
+      );
     }
-
-    return 'red';
+    return this._canonicalLabCache;
   }
 
   // ─── Relative colour calibration ─────────────────────────────────
@@ -813,7 +824,7 @@ export class WebcamScanner {
    * darker than a lit one, but its stickers are still the same colours.
    */
   _labDist(p, q) {
-    const dL = (p[0] - q[0]) * 0.5;
+    const dL = (p[0] - q[0]) * 0.35;
     const da = p[1] - q[1];
     const db = p[2] - q[2];
     return Math.sqrt(dL * dL + da * da + db * db);
@@ -843,17 +854,19 @@ export class WebcamScanner {
     const perFace = N * N;
     const names = COLOR_PALETTE.map(c => c.name);
 
-    if (!FACES_ORDER.every(f => Array.isArray(this.rawSamples[f.code]) && this.rawSamples[f.code].length === perFace)) {
-      return false;
-    }
+    const hasRaw = (code) => Array.isArray(this.rawSamples[code]) && this.rawSamples[code].length === perFace;
+    const rawFaces = FACES_ORDER.filter(f => hasRaw(f.code));
+    if (rawFaces.length === 0) return false;
 
-    // Flatten to the stickers that calibration is allowed to touch.
+    // Flatten to the stickers that calibration is allowed to touch. Stickers
+    // on faces that were filled in by hand (no pixel data) and individually
+    // hand-edited stickers are fixed and only consume colour quota.
     const stickers = [];
     const quota = Object.fromEntries(names.map(n => [n, perFace]));
     for (const f of FACES_ORDER) {
-      const raws = this.rawSamples[f.code];
+      const raws = hasRaw(f.code) ? this.rawSamples[f.code] : null;
       for (let i = 0; i < perFace; i++) {
-        if (this.manualEdits[f.code].has(i)) {
+        if (!raws || this.manualEdits[f.code].has(i)) {
           quota[this.scannedData[f.code][i]] -= 1;
           continue;
         }
@@ -861,13 +874,16 @@ export class WebcamScanner {
       }
     }
     if (stickers.length === 0) return false;
-    if (names.some(n => quota[n] < 0)) return false; // hand edits already over-fill a colour
+    // Hand edits can over-fill a colour; calibrate the rest as well as possible
+    // and let validation report whatever remains inconsistent.
+    for (const n of names) quota[n] = Math.max(0, quota[n]);
+    if (names.reduce((a, n) => a + quota[n], 0) < stickers.length) return false;
 
-    const canonicalLab = Object.fromEntries(names.map(n => [n, this._rgbToLab(CANONICAL_RGB[n])]));
+    const canonicalLab = this._canonicalLab();
 
     // ── Initial references ─────────────────────────────────────────
     let refs;
-    if (N % 2 === 1) {
+    if (N % 2 === 1 && rawFaces.length === FACES_ORDER.length) {
       const mid = Math.floor(perFace / 2);
       const centres = FACES_ORDER.map(f => this._rgbToLab(this.rawSamples[f.code][mid]));
       const perm = this._bestPermutation(centres, names.map(n => canonicalLab[n]));
