@@ -39,6 +39,20 @@ const COLOR_PALETTE = [
 /** Fraction of each grid cell that is sampled, centred — avoids sticker edges and gaps. */
 const CELL_SAMPLE_RATIO = 0.5;
 
+/**
+ * Canonical sticker colours as a camera typically sees them. Only used to
+ * decide *which* of the six measured reference colours is which — the actual
+ * classification is relative to the colours measured from the user's cube.
+ */
+const CANONICAL_RGB = {
+  white:  [245, 245, 245],
+  yellow: [240, 220, 30],
+  red:    [210, 35, 45],
+  orange: [245, 120, 30],
+  blue:   [30, 100, 210],
+  green:  [30, 180, 80],
+};
+
 export class WebcamScanner {
   /**
    * @param {HTMLElement} container
@@ -66,6 +80,10 @@ export class WebcamScanner {
     this.cubeSize = size;
     const totalStickers = size * size;
     this.faceCompleted = { U: false, D: false, F: false, B: false, L: false, R: false };
+    /** Raw median [r,g,b] per sticker, per face — kept so colours can be re-classified relative to each other. */
+    this.rawSamples = { U: null, D: null, F: null, B: null, L: null, R: null };
+    /** Sticker indices the user set by hand; auto-calibration never overrides these. */
+    this.manualEdits = { U: new Set(), D: new Set(), F: new Set(), B: new Set(), L: new Set(), R: new Set() };
     this.scannedData = {
       U: Array(totalStickers).fill('white'),
       D: Array(totalStickers).fill('yellow'),
@@ -235,7 +253,12 @@ export class WebcamScanner {
         return;
       }
 
-      const problem = this._validateScannedState();
+      let problem = this._validateScannedState();
+      if (problem && this._recalibrateColors()) {
+        this._renderGridOverlayAndEditor();
+        this._updateNetPreview();
+        problem = this._validateScannedState();
+      }
       if (problem) {
         this._toast(`⚠ ${problem} — fix the colors in the grid editor`, 3600);
         return;
@@ -438,6 +461,7 @@ export class WebcamScanner {
         cell.addEventListener('click', () => {
           const idx = parseInt(cell.dataset.cell, 10);
           this.scannedData[currentFace][idx] = this.selectedPaletteColor;
+          this.manualEdits[currentFace].add(idx);
 
           // A hand-corrected face counts as reviewed, so the wizard does not
           // block the user for a face they filled in without a photo.
@@ -555,11 +579,21 @@ export class WebcamScanner {
     }
 
     const region = this._guideRegionInSourcePixels(srcW, srcH);
-    const colors = this._extractColors(ctx, region);
-    if (!colors) return false;
+    const extracted = this._extractColors(ctx, region);
+    if (!extracted) return false;
 
-    this.scannedData[currentFace] = colors;
+    this.scannedData[currentFace] = extracted.colors;
+    this.rawSamples[currentFace] = extracted.raws;
+    // A fresh capture supersedes any hand edits made on the old capture.
+    this.manualEdits[currentFace].clear();
     this.faceCompleted[currentFace] = true;
+
+    // Once every face has real pixel data, classify all stickers relative to
+    // each other — this is what makes the reader robust to the lighting.
+    if (this._recalibrateColors()) {
+      this._toast('✓ Colors calibrated across all 6 faces', 2200);
+    }
+
     this._renderGridOverlayAndEditor();
     this._updateNetPreview();
     return true;
@@ -625,13 +659,15 @@ export class WebcamScanner {
    *
    * @param {CanvasRenderingContext2D} ctx
    * @param {{ x: number, y: number, w: number, h: number }} region
-   * @returns {string[]|null} row-major color names, or null if unreadable
+   * @returns {{ colors: string[], raws: number[][] }|null} row-major color
+   *   names and their raw median RGB triples, or null if unreadable
    */
   _extractColors(ctx, region) {
     const N = this.cubeSize;
     const cellW = region.w / N;
     const cellH = region.h / N;
     const resultColors = [];
+    const raws = [];
 
     for (let r = 0; r < N; r++) {
       for (let c = 0; c < N; c++) {
@@ -650,11 +686,13 @@ export class WebcamScanner {
           return null;
         }
 
-        resultColors.push(this._classifyRGBToCubeColor(...this._medianRGB(imgData)));
+        const rgb = this._medianRGB(imgData);
+        raws.push(rgb);
+        resultColors.push(this._classifyRGBToCubeColor(...rgb));
       }
     }
 
-    return resultColors;
+    return { colors: resultColors, raws };
   }
 
   /**
@@ -744,6 +782,179 @@ export class WebcamScanner {
     }
 
     return 'red';
+  }
+
+  // ─── Relative colour calibration ─────────────────────────────────
+
+  /**
+   * sRGB → CIE L*a*b* (D65). Distances in Lab track perceived colour
+   * difference far better than RGB or raw hue, and lighting mostly moves L*
+   * while leaving a and b (the actual colour) comparatively stable.
+   *
+   * @param {number[]} rgb
+   * @returns {number[]} [L, a, b]
+   */
+  _rgbToLab([r, g, b]) {
+    const lin = (c) => {
+      c /= 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    const rl = lin(r), gl = lin(g), bl = lin(b);
+    const x = (rl * 0.4124 + gl * 0.3576 + bl * 0.1805) / 0.95047;
+    const y = (rl * 0.2126 + gl * 0.7152 + bl * 0.0722) / 1.0;
+    const z = (rl * 0.0193 + gl * 0.1192 + bl * 0.9505) / 1.08883;
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    const fx = f(x), fy = f(y), fz = f(z);
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+  }
+
+  /**
+   * Perceptual distance with lightness de-emphasised: a shadowed face is much
+   * darker than a lit one, but its stickers are still the same colours.
+   */
+  _labDist(p, q) {
+    const dL = (p[0] - q[0]) * 0.5;
+    const da = p[1] - q[1];
+    const db = p[2] - q[2];
+    return Math.sqrt(dL * dL + da * da + db * db);
+  }
+
+  /**
+   * Re-classify every scanned sticker relative to the colours actually
+   * measured from this cube under this lighting, instead of against fixed
+   * hue thresholds.
+   *
+   * Reference colours:
+   *  - odd cubes: the six centre stickers, matched to the six colour names by
+   *    the globally cheapest one-to-one assignment (so the whitest centre is
+   *    white, the most orange one is orange, and no two centres share a name);
+   *  - even cubes: the mean of each colour's stickers from the first pass.
+   *
+   * Then every non-hand-edited sticker is assigned to its nearest reference
+   * under the hard constraint that each colour gets exactly N² stickers — a
+   * physical invariant of any real cube. References are refined from the
+   * assignment and the step repeated, which pulls in stickers that sat between
+   * two clusters.
+   *
+   * @returns {boolean} true if a calibration was applied
+   */
+  _recalibrateColors() {
+    const N = this.cubeSize;
+    const perFace = N * N;
+    const names = COLOR_PALETTE.map(c => c.name);
+
+    if (!FACES_ORDER.every(f => Array.isArray(this.rawSamples[f.code]) && this.rawSamples[f.code].length === perFace)) {
+      return false;
+    }
+
+    // Flatten to the stickers that calibration is allowed to touch.
+    const stickers = [];
+    const quota = Object.fromEntries(names.map(n => [n, perFace]));
+    for (const f of FACES_ORDER) {
+      const raws = this.rawSamples[f.code];
+      for (let i = 0; i < perFace; i++) {
+        if (this.manualEdits[f.code].has(i)) {
+          quota[this.scannedData[f.code][i]] -= 1;
+          continue;
+        }
+        stickers.push({ face: f.code, idx: i, lab: this._rgbToLab(raws[i]) });
+      }
+    }
+    if (stickers.length === 0) return false;
+    if (names.some(n => quota[n] < 0)) return false; // hand edits already over-fill a colour
+
+    const canonicalLab = Object.fromEntries(names.map(n => [n, this._rgbToLab(CANONICAL_RGB[n])]));
+
+    // ── Initial references ─────────────────────────────────────────
+    let refs;
+    if (N % 2 === 1) {
+      const mid = Math.floor(perFace / 2);
+      const centres = FACES_ORDER.map(f => this._rgbToLab(this.rawSamples[f.code][mid]));
+      const perm = this._bestPermutation(centres, names.map(n => canonicalLab[n]));
+      refs = {};
+      perm.forEach((colorIdx, centreIdx) => { refs[names[colorIdx]] = centres[centreIdx]; });
+    } else {
+      refs = this._meanByLabel(stickers, (st) => this.scannedData[st.face][st.idx], names, canonicalLab);
+    }
+
+    // ── Balanced nearest-reference assignment, refined twice ────────
+    let assignment = null;
+    for (let iter = 0; iter < 3; iter++) {
+      assignment = this._balancedAssign(stickers, refs, names, quota);
+      refs = this._meanByLabel(stickers, (st, k) => assignment[k], names, refs);
+    }
+
+    stickers.forEach((st, k) => { this.scannedData[st.face][st.idx] = assignment[k]; });
+    return true;
+  }
+
+  /**
+   * Greedy balanced assignment: consider every (sticker, colour) pair from
+   * cheapest to most expensive and accept it while the sticker is free and the
+   * colour still has quota. Near-optimal here because clusters are compact.
+   */
+  _balancedAssign(stickers, refs, names, quota) {
+    const pairs = [];
+    stickers.forEach((st, k) => {
+      names.forEach(n => pairs.push({ k, n, d: this._labDist(st.lab, refs[n]) }));
+    });
+    pairs.sort((a, b) => a.d - b.d);
+
+    const remaining = { ...quota };
+    const out = new Array(stickers.length).fill(null);
+    let unassigned = stickers.length;
+    for (const p of pairs) {
+      if (unassigned === 0) break;
+      if (out[p.k] !== null || remaining[p.n] <= 0) continue;
+      out[p.k] = p.n;
+      remaining[p.n] -= 1;
+      unassigned -= 1;
+    }
+    // Only reachable if quotas sum below the sticker count; keep a valid label.
+    for (let k = 0; k < out.length; k++) if (out[k] === null) out[k] = names[0];
+    return out;
+  }
+
+  /** Mean Lab of the stickers carrying each label, falling back per colour when a label is empty. */
+  _meanByLabel(stickers, labelOf, names, fallback) {
+    const sum = Object.fromEntries(names.map(n => [n, [0, 0, 0, 0]]));
+    stickers.forEach((st, k) => {
+      const acc = sum[labelOf(st, k)];
+      if (!acc) return;
+      acc[0] += st.lab[0]; acc[1] += st.lab[1]; acc[2] += st.lab[2]; acc[3] += 1;
+    });
+    const refs = {};
+    for (const n of names) {
+      const [L, a, b, cnt] = sum[n];
+      refs[n] = cnt > 0 ? [L / cnt, a / cnt, b / cnt] : fallback[n];
+    }
+    return refs;
+  }
+
+  /**
+   * Brute-force the one-to-one matching of six measured colours to six
+   * canonical colours with the smallest total distance (6! = 720 options).
+   *
+   * @returns {number[]} perm[i] = index of the canonical colour for measured i
+   */
+  _bestPermutation(measured, canonical) {
+    const n = measured.length;
+    const cost = measured.map(m => canonical.map(c => this._labDist(m, c)));
+    let best = null, bestCost = Infinity;
+    const used = new Array(n).fill(false);
+    const cur = [];
+    const walk = (i, acc) => {
+      if (acc >= bestCost) return;
+      if (i === n) { bestCost = acc; best = cur.slice(); return; }
+      for (let j = 0; j < n; j++) {
+        if (used[j]) continue;
+        used[j] = true; cur.push(j);
+        walk(i + 1, acc + cost[i][j]);
+        cur.pop(); used[j] = false;
+      }
+    };
+    walk(0, 0);
+    return best;
   }
 
   // ─── Validation ──────────────────────────────────────────────────
