@@ -1,6 +1,6 @@
 /**
  * WebcamScanner.js — Real Computer Vision Camera Reader & Solver Guide Generator
- * 
+ *
  * Features:
  * - Real-time RGB & HSV pixel sampling from live webcam video frame or uploaded picture.
  * - Dynamically supports any cube size (2×2, 3×3, 4×4, 5×5).
@@ -8,6 +8,14 @@
  * - Visual face completion checkmarks (✓) on wizard tabs.
  * - Interactive N×N grid sticker editor with color selector palette (White, Yellow, Red, Orange, Blue, Green).
  * - "Generate Solver Guide" action button.
+ *
+ * SAMPLING GEOMETRY:
+ * The <video> is displayed with `object-fit: cover`, which scales the camera
+ * frame up to fill the wrapper and crops the overflow. The alignment guide the
+ * user frames the cube inside is a separate overlay element inset from that
+ * wrapper. Sampling the raw frame therefore reads the wrong pixels — the
+ * capture must be mapped back through the cover transform so that the sampled
+ * region is exactly the region under the on-screen guide.
  */
 
 const FACES_ORDER = [
@@ -28,6 +36,9 @@ const COLOR_PALETTE = [
   { name: 'green', hex: '#00cc66', label: 'G' },
 ];
 
+/** Fraction of each grid cell that is sampled, centred — avoids sticker edges and gaps. */
+const CELL_SAMPLE_RATIO = 0.5;
+
 export class WebcamScanner {
   /**
    * @param {HTMLElement} container
@@ -40,6 +51,9 @@ export class WebcamScanner {
     this.currentFaceIndex = 0;
     this.selectedPaletteColor = 'white';
     this.cubeSize = 3;
+
+    /** True once the live video has real dimensions and can be sampled. */
+    this.cameraReady = false;
 
     // Track completion state per face
     this.faceCompleted = { U: false, D: false, F: false, B: false, L: false, R: false };
@@ -94,7 +108,8 @@ export class WebcamScanner {
           <div class="scanner-cam-col">
             <div class="video-wrapper">
               <video id="scanner-video" autoplay playsinline muted></video>
-              <img id="scanner-img-preview" class="hidden" alt="Uploaded Face" />
+              <img id="scanner-img-preview" class="hidden" alt="Uploaded Face"
+                   style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" />
               <div class="scanner-grid-overlay" id="cam-overlay-grid"></div>
             </div>
 
@@ -171,7 +186,7 @@ export class WebcamScanner {
     // Face wizard navigation
     this.container.querySelectorAll('.face-wizard-step').forEach(btn => {
       btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.index);
+        const idx = parseInt(btn.dataset.index, 10);
         this._switchFace(idx);
       });
     });
@@ -193,66 +208,196 @@ export class WebcamScanner {
       });
     });
 
-    // Camera photo snap
+    // Camera photo snap — only advance when a frame was genuinely sampled.
     this.container.querySelector('#btn-snap-photo')?.addEventListener('click', () => {
-      this._sampleGridFromVideo();
-      this._autoAdvanceNextFace();
+      if (this._sampleGridFromVideo()) this._autoAdvanceNextFace();
     });
 
     // File upload
     const fileInput = this.container.querySelector('#cam-file-input');
     fileInput?.addEventListener('change', (e) => {
       const file = e.target.files?.[0];
-      if (file) {
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-          const imgPreview = this.container.querySelector('#scanner-img-preview');
-          if (imgPreview) {
-            imgPreview.src = evt.target.result;
-            imgPreview.classList.remove('hidden');
-          }
-          this._sampleGridFromImage(evt.target.result);
-          this._autoAdvanceNextFace();
-        };
-        reader.readAsDataURL(file);
-      }
+      // Reset the input so re-picking the same file still fires a change event.
+      e.target.value = '';
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onerror = () => this._toast('⚠ Could not read that file');
+      reader.onload = (evt) => this._loadAndSampleImage(evt.target.result);
+      reader.readAsDataURL(file);
     });
 
     // Generate solver guide
     this.container.querySelector('#btn-generate-guide')?.addEventListener('click', () => {
+      const missing = FACES_ORDER.filter(f => !this.faceCompleted[f.code]).map(f => f.code);
+      if (missing.length > 0) {
+        this._toast(`⚠ Scan the remaining ${missing.length} face(s): ${missing.join(', ')}`, 2800);
+        return;
+      }
+
+      const problem = this._validateScannedState();
+      if (problem) {
+        this._toast(`⚠ ${problem} — fix the colors in the grid editor`, 3600);
+        return;
+      }
+
       this.onGenerateSolveGuide?.(this.scannedData);
       this.hide();
     });
   }
+
+  // ─── Lifecycle ───────────────────────────────────────────────────
 
   async show(size = 3) {
     this._resetScannedData(size);
     const badge = this.container.querySelector('#scanner-cube-badge');
     if (badge) badge.textContent = `${size}×${size}`;
 
+    this._clearImagePreview();
     this.container.classList.remove('hidden');
-    const video = this.container.querySelector('#scanner-video');
-
-    try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      if (video) video.srcObject = this.stream;
-    } catch (err) {
-      console.warn('[WebcamScanner] Webcam camera not accessible or denied:', err);
-    }
     this._switchFace(0);
+
+    await this._startCamera();
   }
 
   hide() {
+    this._stopCamera();
+    this._clearImagePreview();
+    this.container.classList.add('hidden');
+  }
+
+  /**
+   * Request the camera and wait until the video actually has dimensions.
+   * `facingMode: 'environment'` as a hard constraint fails outright on
+   * desktops with a single front-facing webcam, so it is requested as a
+   * preference with a plain video fallback.
+   */
+  async _startCamera() {
+    const video = this.container.querySelector('#scanner-video');
+    if (!video) return;
+
+    this.cameraReady = false;
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this._toast('⚠ Camera unavailable — use "Upload Picture" instead', 4000);
+      return;
+    }
+
+    const attempts = [
+      { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+      { video: true },
+    ];
+
+    let lastError = null;
+    for (const constraints of attempts) {
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!this.stream) {
+      console.warn('[WebcamScanner] Camera not accessible or denied:', lastError);
+      const denied = lastError?.name === 'NotAllowedError' || lastError?.name === 'SecurityError';
+      this._toast(
+        denied
+          ? '⚠ Camera permission denied — use "Upload Picture" instead'
+          : '⚠ No camera found — use "Upload Picture" instead',
+        4000
+      );
+      return;
+    }
+
+    // The modal may have been closed while the permission prompt was open.
+    if (this.container.classList.contains('hidden')) {
+      this._stopCamera();
+      return;
+    }
+
+    video.srcObject = this.stream;
+
+    try {
+      await this._waitForVideoReady(video);
+      await video.play();
+      this.cameraReady = true;
+    } catch (err) {
+      console.warn('[WebcamScanner] Video failed to start:', err);
+      this._toast('⚠ Camera stream failed to start', 4000);
+    }
+  }
+
+  /**
+   * Resolve once the video reports real dimensions. Sampling before this point
+   * yields a 0×0 frame and silently produces default colors.
+   *
+   * @param {HTMLVideoElement} video
+   */
+  _waitForVideoReady(video) {
+    if (video.videoWidth && video.videoHeight) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Timed out waiting for camera metadata'));
+      }, 8000);
+
+      const onReady = () => {
+        if (!video.videoWidth || !video.videoHeight) return;
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('Video element error'));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        video.removeEventListener('loadedmetadata', onReady);
+        video.removeEventListener('loadeddata', onReady);
+        video.removeEventListener('error', onError);
+      };
+
+      video.addEventListener('loadedmetadata', onReady);
+      video.addEventListener('loadeddata', onReady);
+      video.addEventListener('error', onError);
+    });
+  }
+
+  _stopCamera() {
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());
       this.stream = null;
     }
-    this.container.classList.add('hidden');
+    this.cameraReady = false;
+
+    // Releasing the element's reference matters too: a retained srcObject keeps
+    // the camera indicator lit in some browsers and blocks the next getUserMedia.
+    const video = this.container.querySelector('#scanner-video');
+    if (video) {
+      video.pause();
+      video.srcObject = null;
+    }
   }
+
+  /** Hide the uploaded still so the live camera feed is visible again. */
+  _clearImagePreview() {
+    const imgPreview = this.container.querySelector('#scanner-img-preview');
+    if (imgPreview) {
+      imgPreview.classList.add('hidden');
+      imgPreview.removeAttribute('src');
+    }
+  }
+
+  // ─── Wizard ──────────────────────────────────────────────────────
 
   _switchFace(idx) {
     this.currentFaceIndex = idx;
     const faceObj = FACES_ORDER[idx];
+
+    // Each face is captured from its own frame, so drop the previous upload.
+    this._clearImagePreview();
 
     // Update wizard tabs
     this.container.querySelectorAll('.face-wizard-step').forEach((btn, i) => {
@@ -276,6 +421,7 @@ export class WebcamScanner {
     const camGrid = this.container.querySelector('#cam-overlay-grid');
     if (camGrid) {
       camGrid.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
+      camGrid.style.gridTemplateRows = `repeat(${size}, 1fr)`;
       camGrid.innerHTML = Array(totalStickers).fill('<span></span>').join('');
     }
 
@@ -285,13 +431,18 @@ export class WebcamScanner {
       editorGrid.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
       editorGrid.innerHTML = gridData.map((colorName, i) => {
         const colorObj = COLOR_PALETTE.find(c => c.name === colorName) || COLOR_PALETTE[0];
-        return `<button class="sticker-cell" data-cell="${i}" style="background-color: ${colorObj.hex};" title="Cell ${i+1}: ${colorName}"></button>`;
+        return `<button class="sticker-cell" data-cell="${i}" style="background-color: ${colorObj.hex};" title="Cell ${i + 1}: ${colorName}"></button>`;
       }).join('');
 
       editorGrid.querySelectorAll('.sticker-cell').forEach(cell => {
         cell.addEventListener('click', () => {
-          const idx = parseInt(cell.dataset.cell);
+          const idx = parseInt(cell.dataset.cell, 10);
           this.scannedData[currentFace][idx] = this.selectedPaletteColor;
+
+          // A hand-corrected face counts as reviewed, so the wizard does not
+          // block the user for a face they filled in without a photo.
+          this.faceCompleted[currentFace] = true;
+
           this._renderGridOverlayAndEditor();
           this._updateNetPreview();
         });
@@ -325,99 +476,181 @@ export class WebcamScanner {
     });
   }
 
+  // ─── Capture ─────────────────────────────────────────────────────
+
   /**
-   * Real Computer Vision Pixel Sampling from Video Stream
+   * Sample the current face from the live video stream.
+   * @returns {boolean} true if a real frame was sampled
    */
   _sampleGridFromVideo() {
     const video = this.container.querySelector('#scanner-video');
-    const currentFace = FACES_ORDER[this.currentFaceIndex].code;
 
-    if (video && video.videoWidth && video.videoHeight) {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
-
-      this.scannedData[currentFace] = this._extractColorsFromCanvas(canvas);
-    } else {
-      // Fallback
-      const defaultColor = FACES_ORDER[this.currentFaceIndex].defaultColor;
-      this.scannedData[currentFace] = Array(this.cubeSize * this.cubeSize).fill(defaultColor);
+    if (!video || !this.cameraReady || !video.videoWidth || !video.videoHeight) {
+      this._toast('⚠ Camera not ready — allow access or upload a picture', 3000);
+      return false;
     }
 
-    this.faceCompleted[currentFace] = true;
-    this._renderGridOverlayAndEditor();
-    this._updateNetPreview();
+    // A live snap replaces any still left over from an upload.
+    this._clearImagePreview();
+    return this._captureFace(video, video.videoWidth, video.videoHeight);
   }
 
   /**
-   * Real Computer Vision Pixel Sampling from Uploaded Image
+   * Decode an uploaded picture, show it in the preview, and sample it.
+   * The original implementation sampled immediately after assigning `src`,
+   * before the browser had decoded the image, so `naturalWidth` was still 0
+   * and every upload silently fell back to the face's default color.
+   *
+   * @param {string} dataUrl
    */
-  _sampleGridFromImage(dataUrl) {
-    const currentFace = FACES_ORDER[this.currentFaceIndex].code;
+  _loadAndSampleImage(dataUrl) {
     const imgPreview = this.container.querySelector('#scanner-img-preview');
+    if (!imgPreview) return;
 
-    if (imgPreview && imgPreview.naturalWidth) {
-      const canvas = document.createElement('canvas');
-      canvas.width = imgPreview.naturalWidth;
-      canvas.height = imgPreview.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(imgPreview, 0, 0);
+    const onLoad = () => {
+      imgPreview.removeEventListener('load', onLoad);
+      imgPreview.removeEventListener('error', onError);
+      imgPreview.classList.remove('hidden');
 
-      this.scannedData[currentFace] = this._extractColorsFromCanvas(canvas);
-    } else {
-      const defaultColor = FACES_ORDER[this.currentFaceIndex].defaultColor;
-      this.scannedData[currentFace] = Array(this.cubeSize * this.cubeSize).fill(defaultColor);
-    }
+      if (this._captureFace(imgPreview, imgPreview.naturalWidth, imgPreview.naturalHeight)) {
+        this._autoAdvanceNextFace();
+      }
+    };
+    const onError = () => {
+      imgPreview.removeEventListener('load', onLoad);
+      imgPreview.removeEventListener('error', onError);
+      this._toast('⚠ That image could not be decoded');
+    };
 
-    this.faceCompleted[currentFace] = true;
-    this._renderGridOverlayAndEditor();
-    this._updateNetPreview();
+    imgPreview.addEventListener('load', onLoad);
+    imgPreview.addEventListener('error', onError);
+    imgPreview.src = dataUrl;
   }
 
   /**
-   * Extract N x N grid sticker colors using RGB-to-HSV color classification
+   * Draw a media element to an offscreen canvas and classify the N×N grid
+   * region that sits under the on-screen alignment guide.
+   *
+   * @param {HTMLVideoElement|HTMLImageElement} source
+   * @param {number} srcW — intrinsic source width
+   * @param {number} srcH — intrinsic source height
+   * @returns {boolean} true on success
    */
-  _extractColorsFromCanvas(canvas) {
-    const ctx = canvas.getContext('2d');
-    const w = canvas.width;
-    const h = canvas.height;
-    const N = this.cubeSize;
-    const resultColors = [];
+  _captureFace(source, srcW, srcH) {
+    if (!srcW || !srcH) return false;
 
-    const cellW = w / N;
-    const cellH = h / N;
+    const currentFace = FACES_ORDER[this.currentFaceIndex].code;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = srcW;
+    canvas.height = srcH;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return false;
+
+    try {
+      ctx.drawImage(source, 0, 0, srcW, srcH);
+    } catch (err) {
+      console.warn('[WebcamScanner] Failed to draw frame:', err);
+      return false;
+    }
+
+    const region = this._guideRegionInSourcePixels(srcW, srcH);
+    const colors = this._extractColors(ctx, region);
+    if (!colors) return false;
+
+    this.scannedData[currentFace] = colors;
+    this.faceCompleted[currentFace] = true;
+    this._renderGridOverlayAndEditor();
+    this._updateNetPreview();
+    return true;
+  }
+
+  /**
+   * Map the alignment-guide rectangle from CSS pixels into source-frame
+   * pixels, undoing the `object-fit: cover` scale-and-crop that the browser
+   * applies when painting the media into the wrapper.
+   *
+   * @param {number} srcW
+   * @param {number} srcH
+   * @returns {{ x: number, y: number, w: number, h: number }}
+   */
+  _guideRegionInSourcePixels(srcW, srcH) {
+    const wrapper = this.container.querySelector('.video-wrapper');
+    const guide = this.container.querySelector('#cam-overlay-grid');
+
+    const wrapperRect = wrapper?.getBoundingClientRect();
+    const guideRect = guide?.getBoundingClientRect();
+
+    // If the layout is unavailable (modal not painted yet), fall back to the
+    // largest centred square of the frame, which is a reasonable framing.
+    if (!wrapperRect?.width || !wrapperRect?.height || !guideRect?.width || !guideRect?.height) {
+      const side = Math.min(srcW, srcH);
+      return { x: (srcW - side) / 2, y: (srcH - side) / 2, w: side, h: side };
+    }
+
+    // `cover` scales by the larger ratio, then centres and crops the overflow.
+    const scale = Math.max(wrapperRect.width / srcW, wrapperRect.height / srcH);
+    const displayedW = srcW * scale;
+    const displayedH = srcH * scale;
+    const cropX = (displayedW - wrapperRect.width) / 2;
+    const cropY = (displayedH - wrapperRect.height) / 2;
+
+    // Guide position relative to the wrapper, in CSS pixels.
+    const guideX = guideRect.left - wrapperRect.left;
+    const guideY = guideRect.top - wrapperRect.top;
+
+    // The guide is a square in CSS; force the sampled region square as well so
+    // every N×N cell maps to an undistorted sticker even if layout rounding or
+    // an unexpected wrapper shape makes the overlay rect slightly off-square.
+    const side = Math.min(guideRect.width, guideRect.height) / scale;
+    const x = (guideX + (guideRect.width - side * scale) / 2 + cropX) / scale;
+    const y = (guideY + (guideRect.height - side * scale) / 2 + cropY) / scale;
+    const w = side;
+    const h = side;
+
+    // Clamp into the frame — a guide edge can fall outside a heavily cropped frame.
+    const clampedX = Math.max(0, Math.min(x, srcW - 1));
+    const clampedY = Math.max(0, Math.min(y, srcH - 1));
+    return {
+      x: clampedX,
+      y: clampedY,
+      w: Math.max(1, Math.min(w, srcW - clampedX)),
+      h: Math.max(1, Math.min(h, srcH - clampedY)),
+    };
+  }
+
+  /**
+   * Extract N×N grid sticker colors from a region using RGB-to-HSV
+   * classification, averaging the centre of each cell.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {{ x: number, y: number, w: number, h: number }} region
+   * @returns {string[]|null} row-major color names, or null if unreadable
+   */
+  _extractColors(ctx, region) {
+    const N = this.cubeSize;
+    const cellW = region.w / N;
+    const cellH = region.h / N;
+    const resultColors = [];
 
     for (let r = 0; r < N; r++) {
       for (let c = 0; c < N; c++) {
-        const centerX = Math.floor((c + 0.5) * cellW);
-        const centerY = Math.floor((r + 0.5) * cellH);
+        const sampleW = Math.max(1, Math.floor(cellW * CELL_SAMPLE_RATIO));
+        const sampleH = Math.max(1, Math.floor(cellH * CELL_SAMPLE_RATIO));
+        const sx = Math.floor(region.x + (c + 0.5) * cellW - sampleW / 2);
+        const sy = Math.floor(region.y + (r + 0.5) * cellH - sampleH / 2);
 
-        // Sample 5x5 pixel box
-        const sampleSize = Math.max(2, Math.floor(Math.min(cellW, cellH) * 0.2));
-        const imgData = ctx.getImageData(
-          Math.max(0, centerX - Math.floor(sampleSize / 2)),
-          Math.max(0, centerY - Math.floor(sampleSize / 2)),
-          sampleSize,
-          sampleSize
-        );
-
-        let sumR = 0, sumG = 0, sumB = 0;
-        const totalPixels = imgData.data.length / 4;
-
-        for (let i = 0; i < imgData.data.length; i += 4) {
-          sumR += imgData.data[i];
-          sumG += imgData.data[i + 1];
-          sumB += imgData.data[i + 2];
+        let imgData;
+        try {
+          imgData = ctx.getImageData(Math.max(0, sx), Math.max(0, sy), sampleW, sampleH);
+        } catch (err) {
+          // Tainted canvas (cross-origin image) — nothing can be read.
+          console.warn('[WebcamScanner] Pixel read blocked:', err);
+          this._toast('⚠ This image could not be read (cross-origin)', 3200);
+          return null;
         }
 
-        const avgR = sumR / totalPixels;
-        const avgG = sumG / totalPixels;
-        const avgB = sumB / totalPixels;
-
-        const colorName = this._classifyRGBToCubeColor(avgR, avgG, avgB);
-        resultColors.push(colorName);
+        resultColors.push(this._classifyRGBToCubeColor(...this._medianRGB(imgData)));
       }
     }
 
@@ -425,10 +658,51 @@ export class WebcamScanner {
   }
 
   /**
-   * Classify RGB color values to Rubik's cube sticker color
+   * Per-channel median of a pixel block. The median rejects the outliers a
+   * plain mean is dragged by — specular highlights on glossy stickers and the
+   * dark sticker gaps that clip the edge of a sample box.
+   *
+   * @param {ImageData} imgData
+   * @returns {[number, number, number]}
+   */
+  _medianRGB(imgData) {
+    const data = imgData.data;
+    const pixelCount = data.length / 4;
+    const rs = [], gs = [], bs = [];
+
+    // A cell of a 720p frame can hold tens of thousands of pixels; a few
+    // hundred evenly spread samples pin down the median just as well.
+    const stride = Math.max(1, Math.floor(pixelCount / 512));
+
+    for (let px = 0; px < pixelCount; px += stride) {
+      const i = px * 4;
+      rs.push(data[i]);
+      gs.push(data[i + 1]);
+      bs.push(data[i + 2]);
+    }
+
+    const mid = (arr) => {
+      arr.sort((a, b) => a - b);
+      return arr[Math.floor(arr.length / 2)] || 0;
+    };
+    return [mid(rs), mid(gs), mid(bs)];
+  }
+
+  /**
+   * Classify an RGB triple as one of the six standard sticker colors.
+   *
+   * Works in HSV: value separates bright stickers from shadowed ones,
+   * saturation separates white from the chromatic colors, and hue separates
+   * the five chromatic colors from each other. Every hue is assigned to a
+   * color — the previous version left 260°–345° unclaimed and fell through to
+   * white, which turned violet-cast reds into whites under warm lighting.
+   *
+   * @param {number} r 0-255
+   * @param {number} g 0-255
+   * @param {number} b 0-255
+   * @returns {string}
    */
   _classifyRGBToCubeColor(r, g, b) {
-    // Normalize RGB to 0..1
     const rN = r / 255;
     const gN = g / 255;
     const bN = b / 255;
@@ -437,11 +711,11 @@ export class WebcamScanner {
     const min = Math.min(rN, gN, bN);
     const delta = max - min;
 
-    let h = 0;
-    let s = max === 0 ? 0 : delta / max;
-    let v = max;
+    const v = max;
+    const s = max === 0 ? 0 : delta / max;
 
-    if (delta !== 0) {
+    let h = 0;
+    if (delta > 0) {
       if (max === rN) h = ((gN - bN) / delta) % 6;
       else if (max === gN) h = (bN - rN) / delta + 2;
       else h = (rN - gN) / delta + 4;
@@ -449,44 +723,110 @@ export class WebcamScanner {
       if (h < 0) h += 360;
     }
 
-    // White detection: Low saturation or high brightness with low saturation
-    if (s < 0.22 || (v > 0.8 && s < 0.3)) {
-      return 'white';
+    // White: little chroma. The threshold rises with brightness because a dim
+    // white sticker in shadow still reads as near-neutral, while a dark, weakly
+    // saturated pixel is more likely a shadowed colored sticker than a white one.
+    const whiteSatCutoff = v > 0.65 ? 0.30 : 0.18;
+    if (s < whiteSatCutoff) return 'white';
+
+    // Yellow and white are the pair most often confused: a yellow sticker is
+    // saturated in the 40°–70° band, whereas warm-lit white is not.
+    if (h >= 40 && h < 72) return 'yellow';
+    if (h >= 72 && h < 165) return 'green';
+    if (h >= 165 && h < 260) return 'blue';
+
+    // Orange vs. red both sit in the 0°–40° band. Orange carries a
+    // meaningfully higher green component relative to red than red does.
+    if (h >= 15 && h < 40) return 'orange';
+    if (h < 15 || h >= 260) {
+      const greenRatio = rN > 0 ? gN / rN : 0;
+      return greenRatio > 0.42 ? 'orange' : 'red';
     }
 
-    // Hue-based classification
-    if (h >= 45 && h <= 75) return 'yellow';
-    if (h > 75 && h <= 165) return 'green';
-    if (h > 165 && h <= 260) return 'blue';
-    if (h > 15 && h < 45) return 'orange';
-    if (h <= 15 || h > 345) return 'red';
+    return 'red';
+  }
 
-    return 'white';
+  // ─── Validation ──────────────────────────────────────────────────
+
+  /**
+   * Sanity-check a completed scan before it is handed to the puzzle. A real
+   * cube has exactly N² stickers of each of the six colors, and six distinct
+   * center colors. A mis-detected sticker breaks one of those invariants, and
+   * catching it here is far more useful than silently applying an impossible
+   * state to the 3D cube.
+   *
+   * @returns {string|null} human-readable problem, or null if the scan is consistent
+   */
+  _validateScannedState() {
+    const perFace = this.cubeSize * this.cubeSize;
+    const counts = {};
+
+    for (const face of FACES_ORDER) {
+      for (const color of this.scannedData[face.code]) {
+        counts[color] = (counts[color] || 0) + 1;
+      }
+    }
+
+    const wrong = COLOR_PALETTE
+      .map(c => ({ name: c.name, n: counts[c.name] || 0 }))
+      .filter(c => c.n !== perFace);
+
+    if (wrong.length > 0) {
+      const detail = wrong.map(c => `${c.name} ${c.n}/${perFace}`).join(', ');
+      return `Sticker counts are off (${detail})`;
+    }
+
+    // Centers are fixed on a real cube, so on odd-order cubes all six must differ.
+    if (this.cubeSize % 2 === 1) {
+      const mid = Math.floor(perFace / 2);
+      const centers = FACES_ORDER.map(f => this.scannedData[f.code][mid]);
+      if (new Set(centers).size !== 6) {
+        return 'Two faces have the same center color';
+      }
+    }
+
+    return null;
+  }
+
+  // ─── Feedback ────────────────────────────────────────────────────
+
+  /**
+   * Show a transient message in the existing status toast.
+   *
+   * @param {string} message
+   * @param {number} [duration=1800]
+   */
+  _toast(message, duration = 1800) {
+    const toast = this.container.querySelector('#scan-status-toast');
+    if (!toast) return;
+
+    toast.textContent = message;
+    toast.classList.remove('hidden');
+
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => toast.classList.add('hidden'), duration);
   }
 
   /**
-   * Auto advance to next face after snap
+   * Confirm the capture and advance to the next unscanned face.
    */
   _autoAdvanceNextFace() {
-    const toast = this.container.querySelector('#scan-status-toast');
-    if (toast) {
-      const currentFaceObj = FACES_ORDER[this.currentFaceIndex];
-      toast.textContent = `✓ Face [${currentFaceObj.code}] Captured!`;
-      toast.classList.remove('hidden');
-      setTimeout(() => toast.classList.add('hidden'), 1800);
-    }
+    const currentFaceObj = FACES_ORDER[this.currentFaceIndex];
+    this._toast(`✓ Face [${currentFaceObj.code}] Captured!`);
 
-    // If next face available, advance to it
     if (this.currentFaceIndex < FACES_ORDER.length - 1) {
       setTimeout(() => {
-        this._switchFace(this.currentFaceIndex + 1);
+        // The user may have navigated away during the delay.
+        if (this.currentFaceIndex < FACES_ORDER.length - 1) {
+          this._switchFace(this.currentFaceIndex + 1);
+        }
       }, 500);
-    } else {
-      // All faces scanned!
-      const btnGen = this.container.querySelector('#btn-generate-guide');
-      if (btnGen) {
-        btnGen.classList.add('btn-glow-pulse');
-      }
+      return;
     }
+
+    // Last face in the wizard — highlight the action if the scan is complete.
+    const allDone = FACES_ORDER.every(f => this.faceCompleted[f.code]);
+    const btnGen = this.container.querySelector('#btn-generate-guide');
+    if (btnGen) btnGen.classList.toggle('btn-glow-pulse', allDone);
   }
 }

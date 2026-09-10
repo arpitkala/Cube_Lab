@@ -74,8 +74,16 @@ export class SceneManager {
     this.container.appendChild(this.renderer.domElement);
 
     // ---------- Resize Handler ----------
+    // The container can be resized by layout alone (panels opening, device
+    // rotation, browser chrome collapsing) without a window resize event, so
+    // observe the element itself and keep the window listener as a fallback.
     this._onResize = this._updateSize.bind(this);
     window.addEventListener('resize', this._onResize);
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObserver = new ResizeObserver(this._onResize);
+      this._resizeObserver.observe(this.container);
+    }
 
     // ---------- Theme Change Handler ----------
     this.themeManager.onChange((theme) => {
@@ -100,7 +108,13 @@ export class SceneManager {
   _updateSize() {
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
-    this.renderer.setSize(width, height);
+
+    // A zero-sized container (hidden ancestor, layout not settled yet) would
+    // make the renderer produce a 0x0 drawing buffer and the camera an
+    // undefined aspect ratio, so skip until the element has real dimensions.
+    if (!width || !height) return;
+
+    this.renderer.setSize(width, height, false);
   }
 
   /**
@@ -195,6 +209,7 @@ export class SceneManager {
   dispose() {
     this.stop();
     window.removeEventListener('resize', this._onResize);
+    this._resizeObserver?.disconnect();
     this.renderer.dispose();
     this.container.removeChild(this.renderer.domElement);
   }

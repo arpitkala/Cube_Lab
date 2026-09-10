@@ -102,6 +102,7 @@ class CubeLabApp {
     this._addGroundPlane();
     this._initUI();
     this.sceneManager.start(this.cameraManager.camera);
+    this.cameraManager.frameToPuzzleSize(this.puzzle.size, { animate: false });
     this.cameraManager.setAutoRotate(true);
 
     window.cubelab = this;
@@ -193,18 +194,23 @@ class CubeLabApp {
         console.log('[WebcamScanner] Applying EXACT physical scanned state:', scannedData);
         this._stopSolvePlayback();
         this.puzzle.reset();
-        
+
         // Apply exact scanned facelet colors sticker for sticker onto 3D cubies!
         this.puzzle.setScannedState(scannedData);
-        
-        // Track scramble moves for solving guide execution
-        const scrambleMoves = generateScramble(this.puzzle.size, 15);
-        this.puzzle.scrambleMoves = [...scrambleMoves];
 
-        this.puzzle.moveCount = 0;
+        // The Solver derives its solution by inverting the recorded move
+        // sequence, and a scanned physical cube has no such history. Leaving
+        // it empty is the honest state; filling it with a random scramble (as
+        // an earlier version did) made the guide emit moves that had nothing
+        // to do with the scanned cube and scrambled it further.
+        this.puzzle.scrambleMoves = [];
         this.puzzle.moveHistory = [];
+        this.puzzle.moveRedoStack = [];
+        this.puzzle.moveCount = 0;
+
         this.hudBar.setMoveCount(0);
-        this._setMode('guide');
+        this.hudBar.resetTimer();
+        this._setMode('manual');
       }
     );
 
@@ -303,6 +309,7 @@ class CubeLabApp {
     this.actionBar.show();
 
     this.cameraManager.setAutoRotate(false);
+    this.cameraManager.frameToPuzzleSize(size);
     this.keyboard.enable();
 
     this._setMode('manual');
@@ -325,7 +332,7 @@ class CubeLabApp {
     this.puzzle.reset();
     this.welcomeScreen.show();
     this.cameraManager.setAutoRotate(true);
-    this.cameraManager.setPresetView('isometric');
+    this.cameraManager.resetView(this.puzzle.size, 'isometric');
   }
 
   // ─── Move Handling ─────────────────────────────────────────────
