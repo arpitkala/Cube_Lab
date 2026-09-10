@@ -257,7 +257,7 @@ export class WebcamScanner {
     this.container.querySelector('#btn-autofix-colors')?.addEventListener('click', () => {
       FACES_ORDER.forEach(f => this.manualEdits[f.code].clear());
       if (!this._recalibrateColors()) {
-        this._toast('⚠ Capture at least one face with the camera or a picture first', 2800);
+        this._toast('⚠ Capture or fill in all 6 faces first', 2800);
         return;
       }
       this._renderGridOverlayAndEditor();
@@ -857,6 +857,12 @@ export class WebcamScanner {
     const hasRaw = (code) => Array.isArray(this.rawSamples[code]) && this.rawSamples[code].length === perFace;
     const rawFaces = FACES_ORDER.filter(f => hasRaw(f.code));
     if (rawFaces.length === 0) return false;
+
+    // The per-colour quota is only meaningful once every face is known —
+    // either captured or filled in by hand. Calibrating earlier would let the
+    // placeholder colours of unscanned faces eat the quota and force every
+    // captured sticker into whatever colour is left over.
+    if (!FACES_ORDER.every(f => hasRaw(f.code) || this.faceCompleted[f.code])) return false;
 
     // Flatten to the stickers that calibration is allowed to touch. Stickers
     // on faces that were filled in by hand (no pixel data) and individually
