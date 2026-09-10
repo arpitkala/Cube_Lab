@@ -1161,7 +1161,13 @@ html, body {
 .slider-field { flex: 1; accent-color: var(--accent-primary); cursor: pointer; }
 .replay-counter { font-family: var(--font-mono); font-weight: 800; color: var(--accent-primary); }
 
-.video-wrapper { position: relative; width: 100%; height: 200px; border-radius: 14px; overflow: hidden; background: #000; }
+/* Square viewfinder: the alignment guide is inset equally from every edge, so a
+   1:1 wrapper guarantees a square guide with square N×N cells — matching a real
+   cube face and keeping the sampled region undistorted. */
+.video-wrapper {
+  position: relative; width: 100%; max-width: 420px; aspect-ratio: 1 / 1; margin: 0 auto;
+  border-radius: 14px; overflow: hidden; background: #000;
+}
 #scanner-video { width: 100%; height: 100%; object-fit: cover; }
 .scanner-grid {
   position: absolute; inset: 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
@@ -1595,7 +1601,7 @@ html, body {
   display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; align-items: start;
 }
 
-.cam-action-buttons { display: flex; gap: 10px; margin-top: 10px; }
+.cam-action-buttons { display: flex; gap: 10px; margin-top: 10px; justify-content: center; flex-wrap: wrap; }
 
 .scan-status-toast {
   margin-top: 8px; padding: 8px 14px; border-radius: var(--r-md);
@@ -1641,7 +1647,8 @@ html, body {
 
 .scanner-grid-overlay {
   position: absolute; inset: 16px; display: grid; gap: 3px;
-  pointer-events: none; border: 2px solid var(--accent-primary); border-radius: 8px;
+  box-sizing: border-box; pointer-events: none;
+  border: 2px solid var(--accent-primary); border-radius: 8px;
 }
 .scanner-grid-overlay span { border: 1px dashed rgba(255,255,255,0.4); }
 
